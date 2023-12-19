@@ -1,5 +1,5 @@
 ---
-title: "Fit to GEV with 5 different locations "
+title: "Fit to GEV with 6 different locations "
 format:
   html
 editor: visual
