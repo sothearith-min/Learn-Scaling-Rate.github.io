@@ -1,0 +1,240 @@
+---
+title: "Fit to GEV with 6 different locations "
+format:
+  html
+editor: visual
+---
+
+## Choose 6 KMA stations 
+
+#### Map of each station in South Korea
+
+```{r}
+station = read.csv("kma_asos_61stns.csv")
+```
+
+```{r,message=FALSE}
+library(ggplot2)
+library(ggthemes)
+library(sf)
+```
+
+```{r, message=FALSE}
+shapefile <- st_read("2013_si_do.shp")
+
+stations_sf <- st_as_sf(station, coords = c("Lon", "Lat"), crs = st_crs(shapefile))
+
+ggplot() +
+  geom_sf(data = shapefile, col = "cornflowerblue") +
+  geom_sf(data = stations_sf, size = 1) +
+  geom_sf_text(data = stations_sf, aes(label = ID), vjust = -0.5, hjust = 0.5, size = 2, col = "red") +
+  ggtitle("Station Locations on Shapefile Map") +
+  xlab("Longitude") +
+  ylab("Latitude")+
+  geom_rangeframe() + theme_tufte()
+  
+```
+
+Since I want to inspect two groups of stations---one group will have three stations that are close to one another---I have chosen six places. I want to verify that the scaling rates of the stations that are close to one another are comparable in this instance.
+
+| Group1 | Group2 |
+|--------|--------|
+| KR284  | KR202  |
+| KR285  | KR203  |
+| KR289  | KR114  |
+
+## Read Data and Data Cleaning
+
+```{r}
+files_to_read <- c("KR284.csv", "KR285.csv", "KR289.csv", "KR202.csv", "KR203.csv", "KR114.csv")
+
+for (file in files_to_read) {
+  var_name <- sub("\\.csv$", "", file)
+  assign(var_name, read.csv(file), envir = .GlobalEnv)
+}
+```
+
+### Select Columns 
+
+```{r}
+library(dplyr)
+library(purrr)
+
+files <- c("KR284", "KR285", "KR289", "KR202", "KR203", "KR114")
+select_columns <- function(data) {
+  filtered_data <- data %>%
+    filter(year >= 1980 & year != 2019) %>%
+    select(year, month, day, Pcp, Rhumidity, Tavg)
+  
+  return(filtered_data)
+}
+processed_data <- map(files, ~select_columns(get(.x)))
+list2env(setNames(processed_data, files), .GlobalEnv)
+```
+
+### Check If Rhumidity converted or not!
+
+```{r}
+check_negative_rhumidity <- function(data) {
+  negative_rhumidity_rows <- filter(data, Rhumidity < 1)
+  if (nrow(negative_rhumidity_rows) > 1) {
+    cat("Years with Rhumidity < 1:", unique(negative_rhumidity_rows$year), "\n")
+  } else {
+    cat("No rows with Rhumidity < 1 found.\n")
+  }
+}
+```
+
+```{r}
+check_negative_rhumidity(KR284)
+check_negative_rhumidity(KR285)
+check_negative_rhumidity(KR289)
+check_negative_rhumidity(KR202)
+check_negative_rhumidity(KR203)
+check_negative_rhumidity(KR114)
+```
+
+Before 2018, the **Rhumidity** is not converted yet.
+
+### Convert Rhumidity, Multiply it With 100
+
+```{r}
+data <- lapply(files, function(file) {
+  data <- get(file)
+  data <- mutate(data, Rhumidity = ifelse(year <= 2018, Rhumidity * 100, Rhumidity))
+  data$station <- file
+  return(data)
+}) %>%
+  bind_rows()
+head(data)
+```
+
+```{r}
+calculate_dewpoint <- function(temp, humidity) {
+  A <- 17.27
+  B <- 237.7
+  alpha <- ((A * temp) / (B + temp)) + log(humidity/100.0)
+  return ((B * alpha) / (A - alpha))
+}
+data <- data  %>%
+  filter(Rhumidity >= 0)
+data <- data %>%
+  mutate(Tdew = calculate_dewpoint(Tavg, Rhumidity))
+```
+
+### Select Non-Zero monthly maximum Pcp of each Station and Monthly Tdew
+
+```{r}
+max_pcp <- data %>%
+  filter(Pcp > 0) %>%  
+  group_by(station, year, month) %>%  
+  summarize(max_pcp = max(Pcp)) 
+```
+
+```{r}
+monthly_avg_tdew <- data %>%
+  filter(Pcp > 0) %>%  
+  group_by(station, year, month) %>%  
+  summarize(avg_tdew = mean(Tdew, na.rm = TRUE))
+```
+
+```{r}
+data <- left_join(monthly_avg_tdew, max_pcp, by = c("station", "year", "month"))
+```
+
+### Plot to Check the Relationship 
+
+```{r}
+ggplot(data, aes(x = avg_tdew, y = max_pcp, color = station)) +
+  geom_point() +
+  facet_wrap(~station, scales = "free") +
+  labs(title = "Scatter Plot of avg_tdew vs. max_pcp for Different Stations",
+       x = "Average Tdew", y = "Max Pcp")+
+  geom_rangeframe() + theme_tufte()
+```
+
+## Calculate Scaling Rate 
+
+### Fit monthly max Pcp of each Stations to GEV with Tdew as covariate to Location parameter 
+
+```{r}
+library(evd)
+```
+
+#### Station KR284
+
+```{r}
+kr284 <- data[data$station == "KR284", ]
+evd_res <- fgev(kr284$max_pcp,nsloc=as.data.frame(kr284$avg_tdew),std.err=T)
+scaling_rate_284 =  100*evd_res$estimate[2]/evd_res$estimate[1]
+cat('Scaling Rate of Station KR284 is: ', scaling_rate_284)
+```
+
+#### Station KR285
+
+```{r}
+kr285 <- data[data$station == "KR285", ]
+evd_res <- fgev(kr285$max_pcp,nsloc=as.data.frame(kr285$avg_tdew),std.err=T)
+scaling_rate_285 =  100*evd_res$estimate[2]/evd_res$estimate[1]
+cat('Scaling Rate of Station KR285 is: ', scaling_rate_285)
+```
+
+#### Station KR256
+
+```{r}
+kr289 <- data[data$station == "KR289", ]
+evd_res <- fgev(kr289$max_pcp,nsloc=as.data.frame(kr289$avg_tdew),std.err=T)
+scaling_rate_289 =  100*evd_res$estimate[2]/evd_res$estimate[1]
+cat('Scaling Rate of Station KR289 is: ', scaling_rate_289)
+```
+
+#### Station KR202
+
+```{r}
+kr202 <- data[data$station == "KR202", ]
+evd_res <- fgev(kr202$max_pcp,nsloc=as.data.frame(kr202$avg_tdew),std.err=T)
+scaling_rate_202 =  100*evd_res$estimate[2]/evd_res$estimate[1]
+cat('Scaling Rate of Station KR202 is: ', scaling_rate_202)
+```
+
+#### Station KR203
+
+```{r}
+kr203 <- data[data$station == "KR203", ]
+evd_res <- fgev(kr203$max_pcp,nsloc=as.data.frame(kr203$avg_tdew),std.err=T)
+scaling_rate_203 =  100*evd_res$estimate[2]/evd_res$estimate[1]
+cat('Scaling Rate of Station KR203 is: ', scaling_rate_203)
+```
+
+#### Station KR114
+
+```{r}
+kr114 <- data[data$station == "KR114", ]
+evd_res <- fgev(kr114$max_pcp,nsloc=as.data.frame(kr114$avg_tdew),std.err=T)
+scaling_rate_114 =  100*evd_res$estimate[2]/evd_res$estimate[1]
+cat('Scaling Rate of Station KR114 is: ', scaling_rate_114)
+```
+
+### Comparison
+
+```{r}
+scaling_rates <- data.frame(
+  station = c("KR284", "KR285", "KR289", "KR202", "KR203", "KR114"),
+  scaling_rate = c(6.198925, 7.819038, 6.431452, 5.242106, 5.836146, 5.646393),
+  group = c("group1", "group1", "group1", "group2", "group2", "group2")
+)
+print(scaling_rates)
+```
+
+```{r}
+ggplot(scaling_rates, aes(x = station, y = scaling_rate, fill = group)) +
+  geom_col(position = "dodge", color = "white", width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = ifelse(group == "group1", scales::number(scaling_rate, accuracy = 0.1, suffix = "%/C", scale = 1),
+                               scales::number(scaling_rate, accuracy = 0.1, suffix = "%/C", scale = 1, palette = "reds"))),
+            position = position_dodge(width = 0.5),
+            vjust = -0.5, color = "black", size = 3) +
+  labs(title = "Scaling Rates of Stations", x = "Station", y = "Scaling Rate") +
+  scale_fill_manual(values = c("group1" = "red", "group2" = "black")) +
+  geom_rangeframe() + theme_tufte() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
